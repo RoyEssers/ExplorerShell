@@ -1,0 +1,160 @@
+function New-ExplorerShellFolder
+{
+<#
+    .SYNOPSIS
+        Adds a new folder to be displayed in the left Explorer pane.
+     
+    .DESCRIPTION
+        Adds a new folders to be displayed in the left Explorer pane.
+     
+    .PARAMETER Name
+        Name of the folder to add.
+     
+    .PARAMETER Path
+        Path location where this Folder should point to.
+
+    .PARAMETER Icon
+        Path location to the Icon you want to use.
+    
+    .PARAMETER Force
+        Use the Force switch to replace a folder with the same name.
+             
+    .EXAMPLE
+        PS C:\> New-ExplorerFolder -Name "Custom Drive" - Path 'c:\Temp\Custom'
+     
+        Adds a new folder to be shown in the left Explorer pane.
+#>
+    [CmdletBinding()]
+    param (
+        [Parameter(ValueFromPipeline = $true, Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [string[]]
+        $Name,
+        
+        [ValidateScript({
+            if( -Not ($_ | Test-Path -PathType Container) ){
+                throw "Folder does not exist."
+            }
+            return $true
+        })]
+        [System.IO.FileInfo]$Path,
+        [ValidateScript({
+            if( -Not ($_ | Test-Path -PathType Leaf) ){
+                throw "Icon file does not exist."
+            }
+            return $true
+        })]
+        [System.IO.FileInfo]$Icon='C:\Windows\explorer.exe',
+        [switch]$Force=$false
+    )
+    
+    begin
+    {
+        $ContinueScript = $true
+        if($PSBoundParameters.ContainsKey('Icon')){
+            Write-Verbose "Custom Icon: $($Icon)"            
+        }
+        Get-ChildItem -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace' -Recurse -ea SilentlyContinue | Get-ItemProperty | Select-Object -ExpandProperty '(default)' | ForEach-Object{
+            if($Name -eq $_){
+                if($Force -eq $false){
+                    $ContinueScript = $false
+                    throw "Explorer Shell '$Name' allready exists, please remove first!"
+                }
+                else{
+                    $ContinueScript = $true
+                    Remove-ExplorerShellFolder -Name $Name
+                }
+            }
+        }
+        $Guid = [System.Guid]::NewGuid().ToString("B")
+    }
+    process
+    {
+        if($ContinueScript -eq $true){
+            New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace" -Name $Guid -ItemType directory | Out-Null
+            New-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\$($Guid)" -Name '(Default)' -Value $Name -PropertyType string | Out-Null
+
+            New-Item -Path 'HKCU:\SOFTWARE\Classes\CLSID' -Name $Guid -ItemType directory | Out-Null
+
+            $Hive = "HKCU:\SOFTWARE\Classes\CLSID\$($Guid)"
+            New-ItemProperty -Path $Hive -Name '(Default)' -Value $Name -PropertyType string | Out-Null
+            New-ItemProperty -Path $Hive -Name 'System.IsPinnedToNameSpaceTree' -Value 1 -PropertyType dword | Out-Null
+            New-ItemProperty -Path $Hive -Name 'SortOrderIndex' -Value 42 -PropertyType dword | Out-Null
+            
+            New-Item -Path $Hive -Name 'DefaultIcon' -ItemType directory | Out-Null
+            New-ItemProperty -Path "$Hive\DefaultIcon" -Name '(Default)' -Value "$($Icon),0" | Out-Null
+
+            New-Item -Path $Hive -Name 'InProcServer32' -ItemType directory | Out-Null
+            New-ItemProperty -Path "$Hive\InProcServer32" -Name '(Default)' -Value '%systemroot%\system32\shell32.dll' -PropertyType ExpandString | Out-Null
+
+            New-Item -Path $Hive -Name 'Instance' -ItemType directory | Out-Null
+            New-Item -Path "$Hive\Instance" -Name 'InitPropertyBag' -ItemType directory | Out-Null
+
+            New-ItemProperty -Path "$Hive\Instance" -Name 'CLSID' -Value '{0E5AAE11-A475-4c5b-AB00-C66DE400274E}' -PropertyType string | Out-Null # GUID for Shell File System Folder
+            New-ItemProperty -Path "$Hive\Instance\InitPropertyBag" -Name 'Attributes' -Value 17 -PropertyType dword | Out-Null
+            New-ItemProperty -Path "$Hive\Instance\InitPropertyBag" -Name 'TargetFolderPath' -Value $Path -PropertyType string | Out-Null
+
+            New-Item -Path $Hive -Name 'ShellFolder' -ItemType directory | Out-Null
+            New-ItemProperty -Path "$Hive\ShellFolder" -Name 'FolderValueFlags' -Value 40 -PropertyType dword | Out-Null
+            New-ItemProperty -Path "$Hive\ShellFolder" -Name 'Attributes' -Value 4034920525 -PropertyType dword | Out-Null
+        }
+    }
+    end{
+        if($ContinueScript -eq $true){
+            Write-Verbose "Added folder with GUID: $($Guid)"
+        }
+    }
+}
+
+function Remove-ExplorerShellFolder
+{
+<#
+    .SYNOPSIS
+        Removes a folder displayed in the left Explorer pane.
+     
+    .DESCRIPTION
+        Removes folders displayed in the left Explorer pane.
+     
+    .PARAMETER Name
+        Name of the folder to remove
+     
+    .EXAMPLE
+        PS C:\> Remove-ExplorerFolder -Name "Custom Drive"
+     
+        Removes a folder from the left Explorer pane.
+#>
+    [CmdletBinding()]
+    param (
+        [Parameter(ValueFromPipeline = $true, Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+        [string[]]
+        $Name
+    )
+    
+    begin
+    {
+        $Guid = $null
+        $ContinueScript = $false
+        Get-ChildItem -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace' -Recurse | Get-ItemProperty | ForEach-Object{
+            if($Name -eq $_.'(default)'){
+                $ContinueScript = $true
+                $Guid = (Get-ItemProperty $_.PSPath).PSChildName
+            }
+        }
+    }
+    process
+    {
+        if(($ContinueScript -eq $true) -and ([guid]::TryParse($Guid,$([ref][guid]::Empty)))){
+            if (Test-Path -Path "HKCU:\SOFTWARE\Classes\CLSID\$($Guid)"){
+                Remove-Item -Path "HKCU:\SOFTWARE\Classes\CLSID\$($Guid)" -Recurse | Out-Null
+            }
+            if (Test-Path -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\$($Guid)"){
+                Remove-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\$($Guid)" -Recurse | Out-Null
+            }
+        }
+        
+    }
+    end{
+        if($ContinueScript -eq $true){
+            Write-Verbose "Removed folder with GUID: $($Guid)"
+        }
+    }
+}
